@@ -1,6 +1,5 @@
 import argparse
 import asyncio
-import copy
 import ipaddress
 import json
 import logging
@@ -8,14 +7,20 @@ import os
 import re
 import time
 import tomllib
-from typing import Optional, List, Union
+from enum import Enum
+from typing import Optional, List, Dict, Union
 
 import pycountry
-from pydantic import BaseModel, constr, IPvAnyAddress, conint
+from pydantic import BaseModel, constr, IPvAnyAddress, conint, Field
 
 logging.basicConfig(level=logging.INFO)
 is_develop = os.path.exists('./is_develop.txt')
 is_host_mode = os.path.exists('./is_host_mode.txt')
+try:
+    __a = re.match(r'^(.*)-(.*)-as(.*)-inprtx$', os.uname().nodename)
+    node_name = __a.group(1) + __a.group(2)
+except AttributeError:  # 不是我的命名方式或者，为win开发模式
+    node_name = open('self_node_name.txt').read().strip()
 develop_lxc_device_show_result = """root:
   path: /
   pool: pub-ibgp
@@ -47,133 +52,41 @@ async def run_command(command) -> tuple[int, bytes, bytes]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
-    stdout, stderr = await process.communicate()
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
     return process.returncode, stdout, stderr
 
 
+def run_commands(cmds: list[str]):
+    for cmd in cmds:
+        logging.info(f'执行{cmd}', )
+        if is_develop:
+            continue
+        os.popen(cmd)
+        if ('lxc config device add' in cmd or
+                'lxc config device rm' in cmd):
+            time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
+
+
 def host_mode_command(command: str) -> str:
-    if is_host_mode:
-        return command
-    else:
-        return f'lxc exec pub-ibgp -- {command}'
+    return f'lxc exec pub-ibgp -- {command}' if is_host_mode else command
 
 
 def host_mode_file_path(file_path: str) -> str:
-    if is_host_mode:
-        return file_path
+    return file_path if is_host_mode else f'/var/lib/lxd/containers/pub-ibgp/rootfs{file_path}'
+
+
+def ipaddress_to_gre_fe80(ip_addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv6Address:
+    """
+    ipv4/6  地址转gre fe80::
+    :param ip_addr:
+    :return:
+    """
+    if ip_addr.version == 4:
+        return ipaddress.ip_address('fe80:' + "".join(
+            f"{':' if i % 2 == 0 else ''}{int(b):02x}" for i, b in enumerate(ip_addr.exploded.split('.'))))
     else:
-        return f'/var/lib/lxd/containers/pub-ibgp/rootfs{file_path}'
-
-
-def ipaddress_to_gre_fe80(ip_addr: str):
-    a = ipaddress.ip_address(ip_addr)
-    c = "fe80:"
-    if a.version == 4:
-        for i, b in enumerate(a.__str__().split('.')):
-            if i % 2 == 0:
-                c += ":"
-            c += '{:02x}'.format(int(b))
-    else:
-        for i, b in enumerate(a.exploded.__str__().split(':')):
-            if i in [6, 7] and b:
-                d = f":{b}"
-                if d == ":0000":
-                    continue
-                c += d.replace(":000", ":").replace(":00", ":").replace(":0", ":")
-    return c
-
-
-class BirdIPAddress(BaseModel):
-    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-    mask: int
-    subnet: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]  # 最大广播
-    other_subnet: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]  # 其他应该广播的子网
-    other_subnet_bird_static_reject_str: Optional[str]
-    suffix: Optional[str] = None
-
-    def __init__(self, **data):
-        address = ipaddress.ip_address(data['address'].split('/')[0])
-        # 根据网络类型，直接定义好子网
-        if address.version == 4:  # DN42 IPv4
-            mask = 32
-        elif address not in ipaddress.ip_network('2000::/3'):
-            mask = 64  # DN42 IPv6
-        else:
-            mask = 48  # 公网 IPv4
-
-        other_subnet = []
-        other_subnet_bird_static_reject_str = ""
-        if mask == 32 and address in ipaddress.ip_network('23.146.72.192/27'):  # 公网段
-            other_subnet.append(ipaddress.ip_network(f"{address}/28", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-        elif mask == 32 and address in ipaddress.ip_network('172.20.229.192/27'):  # 国际段
-            other_subnet.append(ipaddress.ip_network(f"{address}/31", strict=False))
-            other_subnet.append(ipaddress.ip_network(f"{address}/27", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-2].compressed} reject;'
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-        elif mask == 32 and address in ipaddress.ip_network('172.23.173.160/28'):  # 中国段
-            other_subnet.append(ipaddress.ip_network(f"{address}/28", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-        elif mask == 32 and address in ipaddress.ip_network('172.20.197.176/29'):  # anycast段将由BGP获取
-            pass
-        elif mask == 64 and address in ipaddress.ip_network('fdf4:56da:a360:42d0::/60'):  # pub中国段
-            other_subnet.append(ipaddress.ip_network(f"{address}/60", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-        elif mask == 64:
-            other_subnet.append(ipaddress.ip_network(f"{address}/63", strict=False))
-            other_subnet.append(ipaddress.ip_network(f"{address}/60", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-2].compressed} reject;'
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-        elif mask == 48 and address in ipaddress.ip_network('2a13:b487:42d0::/44'):  # pub中国段
-            other_subnet.append(ipaddress.ip_network(f"{address}/44", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-            data['suffix'] = address.compressed.split('::')[0].split('2a13:b487:')[-1]
-        elif mask == 48:
-            other_subnet.append(ipaddress.ip_network(f"{address}/47", strict=False))
-            other_subnet.append(ipaddress.ip_network(f"{address}/44", strict=False))
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-2].compressed} reject;'
-            other_subnet_bird_static_reject_str += f'\n    route {other_subnet[-1].compressed} reject;'
-            data['suffix'] = address.compressed.split('::')[0].split('2a13:b487:')[-1]
-
-        data['address'] = address
-        data['mask'] = mask
-        data['subnet'] = ipaddress.ip_network(f"{address}/{mask}", strict=False)
-        data['other_subnet'] = other_subnet
-        data['other_subnet_bird_static_reject_str'] = other_subnet_bird_static_reject_str
-        super().__init__(**data)
-
-
-class VpsInterface(BaseModel):
-    if_name: str = 'eth0'
-    ip_version: int = 4
-    ip_local: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-    ip_public: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-    gre_fe80: Union[ipaddress.IPv6Address]
-    mtu: int = 1500
-
-    def __init__(self, **data):
-        if 'ip_public' not in data and 'ip_local' in data:
-            data['ip_public'] = data['ip_local']
-        ip_public: ipaddress.IPv4Address | ipaddress.IPv6Address = data['ip_local']
-        data['ip_version'] = ip_public.version
-        data['gre_fe80'] = ipaddress_to_gre_fe80(data['ip_local'])
-        super().__init__(**data)
-
-
-class BirdHeadConfig(BaseModel):
-    zt_id: str
-    asn: int
-    ipv4_dn42: BirdIPAddress
-    ipv6_dn42: BirdIPAddress
-    ipv4_pub: BirdIPAddress = None
-    ipv6_pub: BirdIPAddress
-    vps_interface: List[VpsInterface]
-    region_code: int = 52
-    county: str
-    is_transit: bool = False
-    is_send_tier1_large_net_to_ibgp: bool = False
-    is_wire_tier1_large_net_to_kernel: bool = False
-    wg_pub: Optional[str] = None
+        return ipaddress.ip_address(
+            'fe80:' + "".join(f":{b}" if b != "0000" else '' for b in ip_addr.exploded.split(':')[6:]))
 
 
 class PingResult(BaseModel):
@@ -183,8 +96,16 @@ class PingResult(BaseModel):
     mdev: float
     packet_loss: int
     cost: int = 65535
-    text: str = ''
+    text: str = 'fail ping'
+    full_text: Optional[str]
     interface_name: Optional[str] = None
+
+    def __init__(self, **data):
+        data['cost'] = data['avg'] * 100 / (100 - data['packet_loss_percentage']) * 10
+        if data.get('full_text'):
+            data['text'] = data.get('full_text').splitlines()[
+                               -1] + f"loss/cost = {data['packet_loss_percentage']}%/{data['cost']}"
+        super().__init__(**data)
 
 
 class WGPeer(BaseModel):
@@ -193,7 +114,7 @@ class WGPeer(BaseModel):
     allowed_ips: list[IPvAnyAddress]
     endpoint: str = None  # 可选
     persistent_keepalive: conint(ge=0, le=65535) = None  # 可选
-    name: Optional[str] = None
+    name: Optional[str] = Field(description="这是 my_field 的描述。")
 
 
 class WGInterface(BaseModel):
@@ -211,97 +132,167 @@ class WireGuardConfig(BaseModel):
     middle_char: str
 
 
-class BirdHeadGen:
-    def __init__(self, __node_name):
-        self.config_toml = tomllib.loads(open('config.toml', 'r').read())
-        self.node_name = __node_name
-        node_keys = self.config_toml['node'][self.node_name]
-        self.iso3166_code = pycountry.countries.get(alpha_2=node_keys['county']).numeric
-        node_keys2 = copy.deepcopy(node_keys)
-        del node_keys2['ipv4_dn42']
-        del node_keys2['ipv6_dn42']
-        del node_keys2['ipv6']
-        if 'vps_ip' in node_keys2:
-            del node_keys2['vps_ip']
-        vps_interface = self.__class_vps_interface(node_keys)
-        self.node_keys = BirdHeadConfig(ipv4_dn42=BirdIPAddress(address=node_keys['ipv4_dn42']),
-                                        ipv6_dn42=BirdIPAddress(address=node_keys['ipv6_dn42']),
-                                        ipv4_pub=BirdIPAddress(address=node_keys['ipv4']),
-                                        ipv6_pub=BirdIPAddress(address=node_keys['ipv6']),
-                                        vps_interface=vps_interface,
-                                        # vps_ip=vps_ip,
-                                        **node_keys2)
-        if self.node_keys.is_transit:
-            self.node_keys.ipv6_pub.other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
+class WGNetworkTypeEnum(Enum):
+    pub_v4: str = 'pub_v4'
+    pub_v6: str = 'pub_v6'
 
-    def __class_vps_interface(self, node_keys: dict) -> list[VpsInterface]:
-        args = []
-        interface_len = 0
-        if 'vps_ip' not in node_keys:  # 针对采用zerotier组网机器
-            return []
-        for i, a in enumerate(node_keys['vps_ip']):
-            args.append({})
-            args[i]['ip_local'] = ipaddress.ip_address(a)
-            interface_len += 1
-        if 'vps_public_ip' in node_keys:
-            for i, a in enumerate(node_keys['vps_public_ip']):
-                if a:
-                    args[i]['ip_public'] = ipaddress.ip_address(a)
-        if 'vps_ifname' in node_keys:
-            for i, a in enumerate(node_keys['vps_ifname']):
-                if a:
-                    args[i]['if_name'] = a
-        if 'vps_mtu' in node_keys:
-            for i, a in enumerate(node_keys['vps_mtu']):
-                if a:
-                    args[i]['mtu'] = a
-        result = []
-        for arg in args:
-            result.append(VpsInterface(**arg))
-        return result
+
+class WGNetwork(BaseModel):
+    port: int
+    mode: WGNetworkTypeEnum
+    member: List
+
+
+class BirdIPAddressOtherSubnet:
+    def __init__(self):
+        self.other_subnet = []
+        self.other_subnet_bird_static_reject_str = ''
+
+    def add_new_other_subnet(self, address_str: str) -> None:
+        a = ipaddress.ip_network(address_str, strict=False)
+        self.other_subnet.append(a)
+        self.other_subnet_bird_static_reject_str += f'\n    route {a.compressed} reject;'
+
+
+class BirdIPAddress(BaseModel):
+    address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+    mask: int
+    subnet: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]  # 最大广播
+    other_subnet: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]  # 其他应该广播的子网
+    other_subnet_bird_static_reject_str: Optional[str]
+    iid: Optional[str] = None
+
+    def __init__(self, **data):
+        address = ipaddress.ip_address(data['address'].split('/')[0])
+        # 根据网络类型，直接定义好子网 IPv4/6 DN42/pub (32/32) (64/48)
+        mask = 32 if address.version == 4 else 64 if address not in ipaddress.ip_network('2000::/3') else 48
+        other_subnet = BirdIPAddressOtherSubnet()
+        if mask == 32 and address in ipaddress.ip_network('23.146.72.192/27'):  # 公网段
+            other_subnet.add_new_other_subnet(f"{address}/28")
+        elif mask == 32 and address in ipaddress.ip_network('172.20.229.192/27'):  # 国际段
+            other_subnet.add_new_other_subnet(f"{address}/31")
+            other_subnet.add_new_other_subnet(f"{address}/27")
+        elif mask == 32 and address in ipaddress.ip_network('172.23.173.160/28'):  # 中国段
+            other_subnet.add_new_other_subnet(f"{address}/28")
+        elif mask == 32 and address in ipaddress.ip_network('172.20.197.176/29'):  # anycast段将由BGP获取
+            pass
+        elif mask == 64 and address in ipaddress.ip_network('fdf4:56da:a360:42d0::/60'):  # pub中国段
+            other_subnet.add_new_other_subnet(f"{address}/60")
+        elif mask == 64:
+            other_subnet.add_new_other_subnet(f"{address}/63")
+            other_subnet.add_new_other_subnet(f"{address}/60")
+        elif mask == 48 and address in ipaddress.ip_network('2a13:b487:42d0::/44'):  # pub中国段
+            other_subnet.add_new_other_subnet(f"{address}/44")
+            data['iid'] = address.compressed.split('::')[0].split('2a13:b487:')[-1]
+        elif mask == 48:
+            other_subnet.add_new_other_subnet(f"{address}/47")
+            other_subnet.add_new_other_subnet(f"{address}/44")
+            data['iid'] = address.compressed.split('::')[0].split('2a13:b487:')[-1]
+
+        data['address'] = address
+        data['mask'] = mask
+        data['subnet'] = ipaddress.ip_network(f"{address}/{mask}", strict=False)
+        data['other_subnet'] = other_subnet.other_subnet
+        data['other_subnet_bird_static_reject_str'] = other_subnet.other_subnet_bird_static_reject_str
+        super().__init__(**data)
+
+
+class VpsInterface(BaseModel):
+    if_name: str = 'eth0'
+    ip_local: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+    ip_public: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
+    gre_fe80: Union[ipaddress.IPv6Address]
+    mtu: int = 1500
+
+    def __init__(self, **data):
+        ip_local: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(data.get('ip'))
+        if 'ip_public' not in data and 'ip' in data:
+            data['ip_public'] = ip_local
+        data['ip_local'] = ip_local
+        data['gre_fe80'] = ipaddress_to_gre_fe80(ip_local)
+        super().__init__(**data)
+
+
+class Node(BaseModel):
+    zt_id: str
+    ipv4_dn42: BirdIPAddress
+    ipv6_dn42: BirdIPAddress
+    ipv4_pub: BirdIPAddress = None
+    ipv6_pub: BirdIPAddress
+    interface: List[VpsInterface] = None
+    region_code: int = 52
+    county: str
+    is_transit: bool = False
+    is_send_tier1_large_net_to_ibgp: bool = False
+    is_wire_tier1_large_net_to_kernel: bool = False
+    wg_pub: Optional[str] = None
+
+    def __init__(self, **data):
+        data['ipv4_dn42'] = BirdIPAddress(address=data['ipv4_dn42'])
+        data['ipv6_dn42'] = BirdIPAddress(address=data['ipv6_dn42']) if data.get('ipv6_dn42') else None
+        data['ipv4_pub'] = BirdIPAddress(address=data['ipv4']) if data.get('ipv4') else None
+        data['ipv6_pub'] = BirdIPAddress(address=data['ipv6'])
+        super().__init__(**data)
+
+
+class ConfigToml(BaseModel):
+    ibgp_network: Dict[str, List]
+    wg_network: Dict[str, WGNetwork]
+    node: Dict[str, Node]
+
+
+config = ConfigToml(**tomllib.loads(open('config.toml', 'r').read()))
+node_node = config.node.get(node_name)
+
+
+class BirdHeadGen:
+    def __init__(self):
+        self.iso3166_code = pycountry.countries.get(alpha_2=node_node.county).numeric
+        if node_node.is_transit:
+            node_node.ipv6_pub.other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
 
     def gen_bird_head(self):
         a = f"""# This file is generated by bird_head_gen.py
-define OWNIPv4 =  {self.node_keys.ipv4_pub.address};
-define OWNNET = {self.node_keys.ipv4_pub.subnet};
-define OWNIPv6 =  {self.node_keys.ipv6_pub.address};
-define OWNNETv6 = {self.node_keys.ipv6_pub.subnet};
+define OWNIPv4 =  {node_node.ipv4_pub.address};
+define OWNNET = {node_node.ipv4_pub.subnet};
+define OWNIPv6 =  {node_node.ipv6_pub.address};
+define OWNNETv6 = {node_node.ipv6_pub.subnet};
 
-define OWN42IPv4 = {self.node_keys.ipv4_dn42.address};
-define OWN42IPv6 = {self.node_keys.ipv6_dn42.address};
-define OWN42NET = {self.node_keys.ipv4_dn42.subnet};
-define OWN42NETv6 = {self.node_keys.ipv6_dn42.subnet};
+define OWN42IPv4 = {node_node.ipv4_dn42.address};
+define OWN42IPv6 = {node_node.ipv6_dn42.address};
+define OWN42NET = {node_node.ipv4_dn42.subnet};
+define OWN42NETv6 = {node_node.ipv6_dn42.subnet};
 
-define REGION = {self.node_keys.region_code};
+define REGION = {node_node.region_code};
 define COUNTY = {self.iso3166_code};
 define COUNTY42 = 1{self.iso3166_code};
 define FULL_TABLE = false; # 保留的抛弃参数
-define IS_SEND_TIER1_LARGE_NET_TO_IBGP = {'true' if self.node_keys.is_send_tier1_large_net_to_ibgp else 'false'};
-define IS_WIRE_TIER1_LARGE_NET_TO_KERNEL = {'true' if self.node_keys.is_wire_tier1_large_net_to_kernel else 'false'};
-define IS_TRANSIT = {'true' if self.node_keys.is_transit else 'false'};
+define IS_SEND_TIER1_LARGE_NET_TO_IBGP = {'true' if node_node.is_send_tier1_large_net_to_ibgp else 'false'};
+define IS_WIRE_TIER1_LARGE_NET_TO_KERNEL = {'true' if node_node.is_wire_tier1_large_net_to_kernel else 'false'};
+define IS_TRANSIT = {'true' if node_node.is_transit else 'false'};
 
 router id OWN42IPv4;
 
 protocol static {{
     ipv4;
-    route OWNNET reject;{self.node_keys.ipv4_pub.other_subnet_bird_static_reject_str}
+    route OWNNET reject;{node_node.ipv4_pub.other_subnet_bird_static_reject_str}
     
-    route OWN42NET reject;{self.node_keys.ipv4_dn42.other_subnet_bird_static_reject_str}
+    route OWN42NET reject;{node_node.ipv4_dn42.other_subnet_bird_static_reject_str}
 }}
 
 protocol static {{
     ipv6;
-    route OWNNETv6 reject;{self.node_keys.ipv6_pub.other_subnet_bird_static_reject_str}
+    route OWNNETv6 reject;{node_node.ipv6_pub.other_subnet_bird_static_reject_str}
     
-    route OWN42NETv6 reject;{self.node_keys.ipv6_dn42.other_subnet_bird_static_reject_str}
+    route OWN42NETv6 reject;{node_node.ipv6_dn42.other_subnet_bird_static_reject_str}
 }}"""
-        file_path = host_mode_file_path('/etc/bird/head.conf')
+
         if is_develop:
             print(a)
         else:
+            file_path = host_mode_file_path('/etc/bird/head.conf')
             open(file_path, 'w').write(a)
-
-        logging.info(f'写入{file_path}完成')
+            logging.info(f'写入{file_path}完成')
 
     def gen_network_interface_d(self):
         dummy_dn42_str = f"""# This file is generated by bird_head_gen.py
@@ -309,15 +300,15 @@ auto dummydn42
 iface dummydn42 inet6 manual
 pre-up ip link del dummydn42 || true
 pre-up ip link add dummydn42 type dummy || true
-post-up ip addr add {self.node_keys.ipv4_dn42.address}/32 dev dummydn42
-post-up ip addr add {self.node_keys.ipv6_dn42.address}/128 dev dummydn42"""
+post-up ip addr add {node_node.ipv4_dn42.address}/32 dev dummydn42
+post-up ip addr add {node_node.ipv6_dn42.address}/128 dev dummydn42"""
         dummy_pub_str = f"""# This file is generated by bird_head_gen.py
 auto dummypub
 iface dummypub inet6 manual
 pre-up ip link del dummypub || true
 pre-up ip link add dummypub type dummy || true
-post-up ip addr add {self.node_keys.ipv4_pub.address}/32 dev dummypub
-post-up ip -6 addr add {self.node_keys.ipv6_pub.address}/128 dev dummypub"""
+post-up ip addr add {node_node.ipv4_pub.address}/32 dev dummypub
+post-up ip -6 addr add {node_node.ipv6_pub.address}/128 dev dummypub"""
         if is_host_mode:
             open('/etc/network/interfaces.d/dummydn42', 'w').write(dummy_dn42_str)
             open('/etc/network/interfaces.d/dummypub', 'w').write(dummy_pub_str)
@@ -330,104 +321,6 @@ post-up ip -6 addr add {self.node_keys.ipv6_pub.address}/128 dev dummypub"""
 
 
 class NetWorkTools:
-    def __init__(self, __node_name):
-        self.config_toml = tomllib.loads(open('config.toml', 'r').read())
-        self.node_name = __node_name
-
-    def gen_host_create_gre_ip_cmd_yield(self, local_node: str, remote_node: str):
-        local_bird_head_gen = BirdHeadGen(local_node)
-        remote_bird_head_gen = BirdHeadGen(remote_node)
-        local_eth_v4_i, local_eth_v6_i = '', ''
-        for i, a in enumerate(local_bird_head_gen.node_keys.vps_interface):
-            remote_eth_v4_i, remote_eth_v6_i = '', ''
-            for i2, b in enumerate(remote_bird_head_gen.node_keys.vps_interface):
-                if a.ip_version != b.ip_version:  # 如果ip版本不同，跳过
-                    continue
-                if a.mtu - 4 < 1400 or b.mtu - 4 < 1400:  # 如果mtu小于1400，跳过
-                    continue
-                if a.ip_version == 4:
-                    gre_prefix = f'grei{local_eth_v4_i}4{remote_eth_v4_i}{remote_node}'
-                else:
-                    gre_prefix = f'grei{local_eth_v6_i}6{remote_eth_v6_i}{remote_node}'
-                tunnel_mode = 'gre' if a.ip_version == 4 else 'ip6gre'
-                yield a, b, gre_prefix, f"ip tunnel add {gre_prefix} mode {tunnel_mode} dev {a.if_name} local {a.ip_local} remote {b.ip_public} ttl 30"
-
-                if a.ip_version == 4:
-                    remote_eth_v4_i = remote_eth_v4_i + 1 if remote_eth_v4_i != '' else 1
-                elif a.ip_version == 6:
-                    remote_eth_v6_i = remote_eth_v6_i + 1 if remote_eth_v6_i != '' else 1
-            # 直接对本地多接口加入计数
-            if a.ip_version == 4:
-                local_eth_v4_i = local_eth_v4_i + 1 if local_eth_v4_i != '' else 1
-            elif a.ip_version == 6:
-                local_eth_v6_i = local_eth_v6_i + 1 if local_eth_v6_i != '' else 1
-
-    def gen_ifupdown_gre_ip_cmd(self, local_interface: VpsInterface, remote_interface: VpsInterface,
-                                if_name: str, cmd: str, remote_node_name: str):
-        ip_version_str = '' if local_interface.ip_version == 4 else 6
-        a = f'# {remote_node_name} lxc exec pub-ibgp -- ping {remote_interface.gre_fe80}%{if_name} -c 3\n'
-        a += f'auto {if_name}\n'
-        a += f'iface {if_name} inet{ip_version_str} manual\n'
-        a += f'   pre-up ip link del dev {if_name} || true\n'
-        a += f'   pre-up {cmd}\n'
-        a += f'   pre-up ip link set dev {if_name} mtu 1400\n'
-        a += f'   up ip link set {if_name} up\n'
-        a += f'   post-down ip link set {if_name} down\n'
-        a += f'   post-down ip tunnel del {if_name}\n'
-        a += f'\n'
-        return a
-
-    def exe_host_create_cmd(self, ifupdown_gre_ip_cmd: str):
-        result = []
-        for a in ifupdown_gre_ip_cmd.split('\n'):
-            if '#' in a:  # 跳过包含注释
-                continue
-            if 'auto' in a:  # 跳过包含auto
-                continue
-            if 'iface' in a:  # 跳过包含iface
-                continue
-            if 'pre-down' in a:  # 跳过包含pre-down
-                continue
-            if 'post-down' in a:  # 跳过包含post-down
-                continue
-            if not a:
-                continue
-            result.append(a.replace('pre-up ', '').replace('up ', '').strip())
-        return result
-
-    def gen_host_gre_cmd(self):
-        for network_name, peers_name in self.config_toml['gre_network'].items():
-            if self.node_name not in peers_name:
-                continue
-            # ip_cmds = {}
-            ifupdown_gre_conf = ""
-            for peer_name in peers_name:
-                if peer_name == self.node_name:
-                    continue
-                for a, b, c, d in self.gen_host_create_gre_ip_cmd_yield(self.node_name, peer_name):
-                    ifupdown_gre_conf += self.gen_ifupdown_gre_ip_cmd(a, b, c, d, peer_name)
-            if not is_develop:
-                logging.info('写入/etc/network/interfaces.d/lxcpubgre完成')
-                open('/etc/network/interfaces.d/lxcpubgre', 'w').write(ifupdown_gre_conf)
-            logging.debug(ifupdown_gre_conf)
-            lxc_devices = self.__get_lxc_device_show()
-            for peer_name in peers_name:
-                if peer_name == self.node_name:
-                    continue
-                for a, b, c, d in self.gen_host_create_gre_ip_cmd_yield(self.node_name, peer_name):
-                    host_cmd_runs = self.exe_host_create_cmd(self.gen_ifupdown_gre_ip_cmd(a, b, c, d, peer_name))
-                    if c in lxc_devices:  # 如果已经于lxc存在，跳过
-                        continue
-                    host_cmd_runs.append(
-                        f"lxc config device add pub-ibgp {c} nic nictype=physical parent={c} name={c}")
-                    host_cmd_runs.append(
-                        f"lxc exec pub-ibgp -- ip link set {c} up")
-                    if not is_develop:
-                        for cmd in host_cmd_runs:
-                            logging.info(f'执行{cmd}', )
-                            os.popen(cmd)
-                            time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
-
     def gen_host_gre_cmd2(self):
         host_devices = self.get_host_gre()
         lxc_devices = self.__get_lxc_device_show()
@@ -439,11 +332,7 @@ class NetWorkTools:
                 f"lxc config device add pub-ibgp {c} nic nictype=physical parent={c} name={c}")
             host_cmd_runs.append(
                 f"lxc exec pub-ibgp -- ip link set {c} up")
-        if not is_develop:
-            for cmd in host_cmd_runs:
-                logging.info(f'执行{cmd}', )
-                os.popen(cmd)
-                time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
+        run_commands(host_cmd_runs)
 
     def remove_lxc_gre(self):
         lxc_devices = self.__get_lxc_device_show()
@@ -451,26 +340,20 @@ class NetWorkTools:
         for c in lxc_devices:
             if c[:5] not in ['grei4', 'grei6', 'greif']:
                 continue
-            host_cmd_runs.append(
-                f"lxc config device rm pub-ibgp {c}")
-        if not is_develop:
-            for cmd in host_cmd_runs:
-                logging.info(f'执行{cmd}', )
-                os.popen(cmd)
-                time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
+            host_cmd_runs.append(f"lxc config device rm pub-ibgp {c}")
+        run_commands(host_cmd_runs)
 
     def gen_bird_ibgp(self):
         filenames = []
-        for network_name, peers_name in self.config_toml['ibgp_network'].items():
+        for network_name, peers_name in config.ibgp_network.items():
             for peer_name in peers_name:
-                if self.node_name not in peers_name or peer_name == self.node_name or peer_name in filenames:
+                if node_name not in peers_name or peer_name == node_name or peer_name in filenames:
                     continue
-
                 bird_ibgp_conf = f"""# This file is generated by bird_head_gen.py
 protocol bgp ibgp_{peer_name} from IBGP {{
     local as OWNAS;
-    source address {self.config_toml['node'][self.node_name]['ipv6'].split('/')[0]};
-    neighbor {self.config_toml['node'][peer_name]['ipv6'].split('/')[0]} as OWNAS;
+    source address {config.node.get(node_name).ipv6_pub.address.compressed};
+    neighbor {config.node.get(peer_name).ipv6_pub.address.compressed} as OWNAS;
 }}"""
                 filenames.append(peer_name)
                 if not is_develop:
@@ -480,10 +363,7 @@ protocol bgp ibgp_{peer_name} from IBGP {{
 
     def __get_lxc_device_show(self):
         result = []
-        if is_develop:
-            a = develop_lxc_device_show_result
-        else:
-            a = os.popen('lxc config device show pub-ibgp').read()
+        a = develop_lxc_device_show_result if is_develop else os.popen('lxc config device show pub-ibgp').read()
         for b in a.split('\n'):
             b1 = b.strip()
             if b != b1:
@@ -496,8 +376,7 @@ protocol bgp ibgp_{peer_name} from IBGP {{
 
     def get_host_gre(self) -> list:
         result = []
-        a = json.loads(os.popen('ip -json addr show').read())
-        for b in a:
+        for b in json.loads(os.popen('ip -json addr show').read()):
             if b['link_type'] != 'gre6':
                 continue
             if b['ifname'][:5] not in ['grei4', 'grei6', 'greif']:
@@ -507,57 +386,47 @@ protocol bgp ibgp_{peer_name} from IBGP {{
 
 
 class NetWorkWG:
-    def __init__(self, __node_name):
-        self.config_toml = tomllib.loads(open('config.toml', 'r').read())
-        self.node_name = __node_name
-
     def gen_wg_conf(self):
-        local_bird_head_gen = BirdHeadGen(self.node_name)
-        for network_name, network_items in self.config_toml['wg_network'].items():
-            if network_items['mode'] == 'pub_v4':
-                fd_network_prefix = 'fde7:5d84:20a6:f36a:4000::'
-                middle_char = '4'
-                wg_file_name = 'wgi4.conf'
-            elif network_items['mode'] == 'pub_v6':
-                fd_network_prefix = 'fde7:5d84:20a6:f36a:6000::'
-                middle_char = '6'
-                wg_file_name = 'wgi6.conf'
+        for network_name, network_items in config.wg_network.items():
+            if network_items.mode == 'pub_v4':
+                fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:4000::', 'wgi4'
+            elif network_items.mode == 'pub_v6':
+                fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:6000::', 'wgi6'
             else:
-                fd_network_prefix = 'fde7:5d84:20a6:f36a:f000::'
-                middle_char = 'f'
-                wg_file_name = 'wgif.conf'
-            if is_develop:
-                private_key = 'gEmWFlVLvPEwfB7fWWrlwC00xME0zA8yOdTrwtBZP24='
-            else:
-                private_key = open('/etc/wireguard/privatekey').read().split('\n')[0]
+                fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:f000::', 'wgif'
+            private_key = open(
+                '/etc/wireguard/privatekey').read().strip() if not is_develop else 'gEmWFlVLvPEwfB7fWWrlwC00xME0zA8yOdTrwtBZP24='
+
             wg_interface = WGInterface(private_key=private_key,
                                        address=[
                                            ipaddress.IPv6Address(
-                                               fd_network_prefix + local_bird_head_gen.node_keys.ipv6_pub.suffix)],
-                                       listen_port=network_items['port'])
+                                               fd_network_prefix + config.node.get(node_name).ipv6_pub.iid)],
+                                       listen_port=network_items.port)
             wg_peers = []
-            for peer_name in network_items['member']:
-                if self.node_name not in network_items['member'] or self.node_name == peer_name:
+            for wg_peer_node_name in network_items.member:
+                if node_name not in network_items.member or node_name == wg_peer_node_name:
                     continue
-                remote_bird_head_gen = BirdHeadGen(peer_name)
-                for vps_interface in remote_bird_head_gen.node_keys.vps_interface:
-                    if vps_interface.ip_version == 4 and network_items['mode'] != 'pub_v4':
+                node = config.node.get(wg_peer_node_name)
+                for vps_interface in node.interface:
+                    if (vps_interface.ip_local.version == 4 and network_items.mode != 'pub_v4' or
+                            vps_interface.ip_local.version == 6 and network_items.mode != 'pub_v6'):
                         continue
-                    if vps_interface.ip_version == 6 and network_items['mode'] != 'pub_v6':
-                        continue
-                    wg_peers.append(WGPeer(public_key=remote_bird_head_gen.node_keys.wg_pub,
+                    wg_peers.append(WGPeer(public_key=node.wg_pub,
                                            allowed_ips=[
-                                               ipaddress.IPv6Address(
-                                                   fd_network_prefix + remote_bird_head_gen.node_keys.ipv6_pub.suffix)],
-                                           endpoint=f"{vps_interface.ip_public}:{network_items['port']}",
-                                           name=peer_name))
-            wg_config = WireGuardConfig(interface=wg_interface, peers=wg_peers, name=wg_file_name.split('.')[0],
-                                        middle_char=middle_char)
-            logging.info(f'写入/etc/wireguard/wgi{middle_char}.conf配置文件')
+                                               ipaddress.IPv6Address(fd_network_prefix + node.ipv6_pub.iid)],
+                                           endpoint=f"{vps_interface.ip_public}:{network_items.port}",
+                                           name=wg_peer_node_name))
+            wg_config = WireGuardConfig(interface=wg_interface, peers=wg_peers, name=wg_interface_name,
+                                        middle_char=wg_interface_name[-1])
+            logging.info(f'写入 /etc/wireguard/{wg_interface_name}.conf 配置文件')
+
             if is_develop:
                 print(self.generate_wg_conf(wg_config))
             else:
-                open(f'/etc/wireguard/wgi{middle_char}.conf', 'w').write(self.generate_wg_conf(wg_config))
+                open(f'/etc/wireguard/{wg_interface_name}.conf', 'w').write(self.generate_wg_conf(wg_config))
+                run_commands([f'wg-quick down {wg_interface_name}||true',
+                              f'wg-quick up {wg_interface_name}',
+                              f'systemctl enable wg-qucik@{wg_interface_name}'])
 
     def generate_wg_conf(self, a: WireGuardConfig) -> str:
         # 生成 Interface 部分
@@ -578,7 +447,7 @@ class NetWorkWG:
             if peer.name:
                 peer_conf += f"# name {peer.name}\n"
             peer_conf += f'# ping6 {peer.allowed_ips[0].__str__()} -M do -s 2752\n'
-            peer_conf += f'# {peer.name} lxc exec pub-ibgp -- ping fe80::{peer.allowed_ips[0].__str__().split(":")[-1]}%grei{a.middle_char}{peer.name} -c 3\n'
+            peer_conf += f'# {peer.name} lxc exec pub-ibgp -- ping fe80::{peer.allowed_ips[0].__str__().split(":")[-1]}%grei{a.middle_char}{peer.name} -c 3 -M do -s 16 -W 10\n'
             peer_conf += f"PublicKey = {peer.public_key}\n"
             if peer.preshared_key:
                 peer_conf += f"PresharedKey = {peer.preshared_key}\n"
@@ -596,14 +465,13 @@ class NetWorkWG:
 
 
 class NetworkOSPF:
-    async def __get_ping_result(self, __test_ip: str, interface_name=None, count=10) -> [PingResult, None]:
+    async def __get_ping_result(self, __test_ip: str, interface_name=None, count=10) -> PingResult | None:
         if is_develop:
             stdout = develop_ping_result.encode()
         else:
             returncode, stdout, stderr = await run_command(
-                host_mode_command(f'ping -c {count} {__test_ip}'))
-        __ping_result = stdout.decode()
-        __ping_result = '\n'.join(line for line in __ping_result.splitlines() if line.strip())  # 去除空行
+                host_mode_command(f'ping -c {count} {__test_ip} -M do -s 16 -W 10'))
+        __ping_result = '\n'.join(line for line in stdout.decode().splitlines() if line.strip())  # 去除空行
         packet_loss_match = re.search(r'(\d+)% packet loss', __ping_result)
         if not packet_loss_match:
             return  # 如果没有匹配到，返回None
@@ -613,94 +481,66 @@ class NetworkOSPF:
         __a = __ping_result.splitlines()[-1].split(' ')[-2].split('/')
 
         result = PingResult(min=__a[0], avg=__a[1], max=__a[2], mdev=__a[3], packet_loss=packet_loss_percentage,
-                            interface_name=interface_name)
-        result.cost = int(result.avg * 100 / (100 - packet_loss_percentage) * 10)
-        result.text = __ping_result.splitlines()[-1] + f'loss/cost = {packet_loss_percentage}%/{result.cost}'
+                            interface_name=interface_name, full_text=__ping_result)
         return result
 
     async def ping_ip(self, __test_ip: str, interface_name=None) -> PingResult:
-        """
-        测试ip的延迟
-        最大尝试3次，如果ping失败，返回300msF
-        :param
-        interface_name:
-        :param
-        __test_ip:
-        :return:
-        """
+        # 最大尝试3次，如果ping失败，返回300ms
         result = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping',
                             interface_name=interface_name)
         if not await self.__get_ping_result(__test_ip, interface_name, 1):  # 当第一次ping无效时候，接下来不做测试
             logging.warning(f'测试 {__test_ip} None ping')
             return result
         result = await self.__get_ping_result(__test_ip, interface_name)
-
         logging.info(f'测试 {__test_ip} {result.text}')
         return result  # 如果超过10次，返回300ms
 
-    async def __test_all_ip(self):
-
+    async def __test_all_ip(self) -> [PingResult, ]:
+        files_to_check, lxc_pub_gre_list = [
+            '/etc/network/interfaces.d/lxcpubgre',
+            '/etc/network/interfaces.d/lxcpub2gre',
+            '/etc/wireguard/wgi4.conf',
+            '/etc/wireguard/wgi6.conf',
+            '/etc/wireguard/wgif.conf'
+        ], ''
         if is_develop:
             lxc_pub_gre_list = open('lxcpubgre.txt', 'r').read()
         else:
-            lxc_pub_gre_list = ''
-            if os.path.exists('/etc/network/interfaces.d/lxcpubgre'):
-                lxc_pub_gre_list += open('/etc/network/interfaces.d/lxcpubgre', 'r').read()
-            if os.path.exists('/etc/network/interfaces.d/lxcpub2gre'):
-                lxc_pub_gre_list += open('/etc/network/interfaces.d/lxcpub2gre', 'r').read()
-            if os.path.exists('/etc/wireguard/wgi4.conf'):
-                lxc_pub_gre_list += open('/etc/wireguard/wgi4.conf', 'r').read()
-            if os.path.exists('/etc/wireguard/wgi6.conf'):
-                lxc_pub_gre_list += open('/etc/wireguard/wgi6.conf', 'r').read()
-            if os.path.exists('/etc/wireguard/wgif.conf'):
-                lxc_pub_gre_list += open('/etc/wireguard/wgif.conf', 'r').read()
+            for file_path in files_to_check:
+                lxc_pub_gre_list += open(file_path, 'r').read() if os.path.exists(file_path) else ''
         if not lxc_pub_gre_list:
             logging.warning('测试延迟ping命令 /etc/network/interfaces.d/lxcpubgre 为空')
             logging.error('获取延迟失败')
             return
-        lxc_pub_gre_list = lxc_pub_gre_list.split('\n')
         test_ips = []
-        for lxc_pub_gre in lxc_pub_gre_list:
-            if '#' not in lxc_pub_gre:
-                continue
-            if 'lxc exec pub-ibgp -- ping' not in lxc_pub_gre:
+        for lxc_pub_gre in lxc_pub_gre_list.split('\n'):
+            if ('#' not in lxc_pub_gre or
+                    'lxc exec pub-ibgp -- ping' not in lxc_pub_gre):
                 continue
             fe80_address, interface_name = None, None
             for a in lxc_pub_gre.split(' '):
-                if a.startswith('fe80:') and '%' in a:
-                    fe80_address, interface_name = a.split('%')
+                fe80_address, interface_name = a.split('%') if a.startswith('fe80:') and '%' in a else None, None
             if not fe80_address:
                 continue
             test_ips.append((fe80_address, interface_name))
-        interface_name_list = {}
         logging.debug(f'测试以下ip{test_ips}')
-        for __ping_ip_test in await asyncio.gather(
-                *(self.ping_ip(f'{fe80_address}%{interface_name}', interface_name) for fe80_address, interface_name in
-                  test_ips)):
-            if __ping_ip_test.interface_name:
-                interface_name_list[__ping_ip_test.interface_name] = {'cost': __ping_ip_test.cost,
-                                                                      'text': __ping_ip_test.text}
-        return interface_name_list
+        return await asyncio.gather(
+            *(self.ping_ip(f'{fe80_address}%{interface_name}', interface_name) for fe80_address, interface_name in
+              test_ips))
 
-    def gen_ospf_config(self):
-        interface_name_list = asyncio.run(self.__test_all_ip())
-        ospf_interface_str = ''
-        for interface_name, key in interface_name_list.items():
-            ospf_interface_str += f'\n        interface "{interface_name}" {{type ptp; cost {key["cost"]}; }}; # {key["text"]}'
-
+    def gen_ospf_config(self, ospf_interface_str: str = ''):
+        ping_results: List[PingResult] = asyncio.run(self.__test_all_ip())
+        for ping_result in ping_results:
+            ospf_interface_str += f'\n        interface "{ping_result.interface_name}" {{type ptp; cost {ping_result.cost}; }}; # {ping_result.text}'
         ospf_config = f"""  # This file is generated by bird_head_gen.py
 protocol ospf v3 aospf6 {{
     ipv6{{
         import filter{{
-            if !(net.len <= 48 || net.len=128) then reject;
-            if !is_self_net_v6() then reject;
-            if (source = RTS_BGP && net !~ [2a13:b487:42d0::/44+]) then reject;
+            if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
             accept;
         }};
         export filter{{
-            if !(net.len <= 48 || net.len=128) then reject;
-            if !is_self_net_v6() then reject;
-            if (source = RTS_BGP && net !~ [2a13:b487:42d0::/44+]) then reject;
+            if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
             accept;
         }};
     }};
@@ -722,27 +562,25 @@ if __name__ == '__main__':
                         choices=["gen_bird_head", 'gen_network_interface_d', "gen_bird_ibgp", "gen_wg", "gen_gre",
                                  "remove_gre", "gen_ospf_cost"])
     args = parser.parse_args()
-    node_name = open('self_node_name.txt', 'r').read().strip()
     if args.module == 'gen_bird_head':
-        bird_head_gen = BirdHeadGen(node_name)
+        bird_head_gen = BirdHeadGen()
         bird_head_gen.gen_bird_head()
     elif args.module == 'gen_network_interface_d':
-        bird_head_gen = BirdHeadGen(node_name)
+        bird_head_gen = BirdHeadGen()
         bird_head_gen.gen_network_interface_d()
     elif args.module == 'gen_bird_ibgp':
-        network_tools = NetWorkTools(node_name)
+        network_tools = NetWorkTools()
         network_tools.gen_bird_ibgp()
     elif args.module == 'gen_wg':
-        network_wg = NetWorkWG(node_name)
+        network_wg = NetWorkWG()
         network_wg.gen_wg_conf()
     elif args.module == 'gen_gre':
-        network_tools = NetWorkTools(node_name)
+        network_tools = NetWorkTools()
         network_tools.gen_host_gre_cmd2()
     elif args.module == 'remove_gre':
-        network_tools = NetWorkTools(node_name)
+        network_tools = NetWorkTools()
         network_tools.remove_lxc_gre()
     elif args.module == 'gen_ospf_cost':
         network_ospf = NetworkOSPF()
         network_ospf.gen_ospf_config()
-    if not is_develop:
-        os.system(host_mode_command('birdc c'))
+    os.system(host_mode_command('birdc c')) if not is_develop else None  # 非开发模式直接birdc reload
