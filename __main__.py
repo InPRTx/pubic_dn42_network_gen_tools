@@ -1,5 +1,6 @@
 import argparse
 import asyncio
+import copy
 import ipaddress
 import json
 import logging
@@ -13,9 +14,13 @@ from typing import Optional, List, Dict, Union
 import pycountry
 from pydantic import BaseModel, constr, IPvAnyAddress, conint, Field
 
-logging.basicConfig(level=logging.INFO)
 is_develop = os.path.exists('./is_develop.txt')
 is_host_mode = os.path.exists('./is_host_mode.txt')
+is_debug_mode = os.path.exists('./is_debug_mode.txt')
+if is_debug_mode:
+    logging.basicConfig(level=logging.DEBUG)
+else:
+    logging.basicConfig(level=logging.INFO)
 try:
     __a = re.match(r'^(.*)-(.*)-as(.*)-inprtx$', os.uname().nodename)
     node_name = __a.group(1) + __a.group(2)
@@ -46,13 +51,15 @@ develop_ping_result = """PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
 rtt min/avg/max/mdev = 168.299/169.035/169.382/0.440 ms"""
 
 
-async def run_command(command) -> tuple[int, bytes, bytes]:
+async def run_command(command: str) -> tuple[int, bytes, bytes]:
     process = await asyncio.create_subprocess_shell(
         command,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
+    logging.debug(f'执行了命令 {command}')
     stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=60)
+    logging.debug(f'输出的结果为 {stdout}')
     return process.returncode, stdout, stderr
 
 
@@ -63,12 +70,13 @@ def run_commands(cmds: list[str]):
             continue
         os.popen(cmd)
         if ('lxc config device add' in cmd or
-                'lxc config device rm' in cmd):
+                'lxc config device rm' in cmd or
+                'wg-quick' in cmd):
             time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
 
 
 def host_mode_command(command: str) -> str:
-    return f'lxc exec pub-ibgp -- {command}' if is_host_mode else command
+    return command if is_host_mode else f'lxc exec pub-ibgp -- {command}'
 
 
 def host_mode_file_path(file_path: str) -> str:
@@ -94,17 +102,24 @@ class PingResult(BaseModel):
     avg: float
     max: float
     mdev: float
-    packet_loss: int
+    packet_loss: int = 100
     cost: int = 65535
     text: str = 'fail ping'
     full_text: Optional[str]
     interface_name: Optional[str] = None
+    mtu: int = 1500
 
     def __init__(self, **data):
-        data['cost'] = data['avg'] * 100 / (100 - data['packet_loss_percentage']) * 10
-        if data.get('full_text'):
+        if data.get('packet_loss') is None or int(data.get('packet_loss')) == 100:
+            data['cost'] = 65535
+            data['text'] = 'fail ping'
+        else:
+            packet_loss = int(data.get('packet_loss'))
+            avg = int(float(data['avg']))
+
+            data['cost'] = avg * 100 / (100 - packet_loss) * 10
             data['text'] = data.get('full_text').splitlines()[
-                               -1] + f"loss/cost = {data['packet_loss_percentage']}%/{data['cost']}"
+                               -1] + f"loss/cost = {packet_loss}%/{data['cost']}"
         super().__init__(**data)
 
 
@@ -115,6 +130,7 @@ class WGPeer(BaseModel):
     endpoint: str = None  # 可选
     persistent_keepalive: conint(ge=0, le=65535) = None  # 可选
     name: Optional[str] = Field(description="这是 my_field 的描述。")
+    mtu: int = 1500
 
 
 class WGInterface(BaseModel):
@@ -170,7 +186,6 @@ class BirdIPAddress(BaseModel):
         if mask == 32 and address in ipaddress.ip_network('23.146.72.192/27'):  # 公网段
             other_subnet.add_new_other_subnet(f"{address}/28")
         elif mask == 32 and address in ipaddress.ip_network('172.20.229.192/27'):  # 国际段
-            other_subnet.add_new_other_subnet(f"{address}/31")
             other_subnet.add_new_other_subnet(f"{address}/27")
         elif mask == 32 and address in ipaddress.ip_network('172.23.173.160/28'):  # 中国段
             other_subnet.add_new_other_subnet(f"{address}/28")
@@ -232,6 +247,8 @@ class Node(BaseModel):
         data['ipv6_dn42'] = BirdIPAddress(address=data['ipv6_dn42']) if data.get('ipv6_dn42') else None
         data['ipv4_pub'] = BirdIPAddress(address=data['ipv4']) if data.get('ipv4') else None
         data['ipv6_pub'] = BirdIPAddress(address=data['ipv6'])
+        if data.get('is_transit'):
+            data['ipv6_pub'].other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
         super().__init__(**data)
 
 
@@ -244,12 +261,13 @@ class ConfigToml(BaseModel):
 config = ConfigToml(**tomllib.loads(open('config.toml', 'r').read()))
 node_node = config.node.get(node_name)
 
+ping_result_fail = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping',
+                              packet_loss_percentage=100)
+
 
 class BirdHeadGen:
     def __init__(self):
         self.iso3166_code = pycountry.countries.get(alpha_2=node_node.county).numeric
-        if node_node.is_transit:
-            node_node.ipv6_pub.other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
 
     def gen_bird_head(self):
         a = f"""# This file is generated by bird_head_gen.py
@@ -309,13 +327,8 @@ pre-up ip link del dummypub || true
 pre-up ip link add dummypub type dummy || true
 post-up ip addr add {node_node.ipv4_pub.address}/32 dev dummypub
 post-up ip -6 addr add {node_node.ipv6_pub.address}/128 dev dummypub"""
-        if is_host_mode:
-            open('/etc/network/interfaces.d/dummydn42', 'w').write(dummy_dn42_str)
-            open('/etc/network/interfaces.d/dummypub', 'w').write(dummy_pub_str)
-        else:
-            open('/var/lib/lxd/containers/pub-ibgp/rootfs/etc/network/interfaces.d/dummydn42', 'w').write(
-                dummy_dn42_str)
-            open('/var/lib/lxd/containers/pub-ibgp/rootfs/etc/network/interfaces.d/dummypub', 'w').write(dummy_pub_str)
+        open(host_mode_file_path('/etc/network/interfaces.d/dummydn42'), 'w').write(dummy_dn42_str)
+        open(host_mode_file_path('/etc/network/interfaces.d/dummypub'), 'w').write(dummy_pub_str)
         logging.info('写入/etc/network/interfaces.d/dummydn42完成')
         logging.info('写入/etc/network/interfaces.d/dummypub完成')
 
@@ -388,15 +401,14 @@ protocol bgp ibgp_{peer_name} from IBGP {{
 class NetWorkWG:
     def gen_wg_conf(self):
         for network_name, network_items in config.wg_network.items():
-            if network_items.mode == 'pub_v4':
+            if network_items.mode == WGNetworkTypeEnum.pub_v4:
                 fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:4000::', 'wgi4'
-            elif network_items.mode == 'pub_v6':
+            elif network_items.mode == WGNetworkTypeEnum.pub_v6:
                 fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:6000::', 'wgi6'
             else:
                 fd_network_prefix, wg_interface_name = 'fde7:5d84:20a6:f36a:f000::', 'wgif'
             private_key = open(
                 '/etc/wireguard/privatekey').read().strip() if not is_develop else 'gEmWFlVLvPEwfB7fWWrlwC00xME0zA8yOdTrwtBZP24='
-
             wg_interface = WGInterface(private_key=private_key,
                                        address=[
                                            ipaddress.IPv6Address(
@@ -404,20 +416,29 @@ class NetWorkWG:
                                        listen_port=network_items.port)
             wg_peers = []
             for wg_peer_node_name in network_items.member:
+                node_interface = None
+                for a in node_node.interface:
+                    if (network_items.mode == WGNetworkTypeEnum.pub_v4 and a.ip_local.version == 4) or (
+                            network_items.mode == WGNetworkTypeEnum.pub_v6 and a.ip_local.version == 6):
+                        node_interface = a
                 if node_name not in network_items.member or node_name == wg_peer_node_name:
                     continue
                 node = config.node.get(wg_peer_node_name)
                 for vps_interface in node.interface:
-                    if (vps_interface.ip_local.version == 4 and network_items.mode != 'pub_v4' or
-                            vps_interface.ip_local.version == 6 and network_items.mode != 'pub_v6'):
+                    if (vps_interface.ip_local.version == 4 and network_items.mode != WGNetworkTypeEnum.pub_v4 or
+                            vps_interface.ip_local.version == 6 and network_items.mode != WGNetworkTypeEnum.pub_v6):
                         continue
+                    wg_peer_mtu = vps_interface.mtu if vps_interface.mtu < node_interface.mtu else node_interface.mtu  # 设置为双方最小协商的mtu
+                    wg_peer_mtu = 1500 if 1500 < wg_peer_mtu else wg_peer_mtu  # 大于1500的mtu统一设置为1500
+                    wg_peer_mtu = wg_peer_mtu - 112 if vps_interface.ip_local.version == 4 else wg_peer_mtu - 132 \
+                        if wg_peer_mtu not in [1500, 9000] else 1500
                     wg_peers.append(WGPeer(public_key=node.wg_pub,
                                            allowed_ips=[
                                                ipaddress.IPv6Address(fd_network_prefix + node.ipv6_pub.iid)],
                                            endpoint=f"{vps_interface.ip_public}:{network_items.port}",
-                                           name=wg_peer_node_name))
+                                           name=wg_peer_node_name, mtu=wg_peer_mtu))
             wg_config = WireGuardConfig(interface=wg_interface, peers=wg_peers, name=wg_interface_name,
-                                        middle_char=wg_interface_name[-1])
+                                        middle_char=wg_interface_name[-1], )
             logging.info(f'写入 /etc/wireguard/{wg_interface_name}.conf 配置文件')
 
             if is_develop:
@@ -437,8 +458,7 @@ class NetWorkWG:
         interface_conf += f"Address = {a.interface.address[0].__str__()}/128\n"
         if a.interface.listen_port:
             interface_conf += f"ListenPort = {a.interface.listen_port}\n"
-        if a.interface.mtu:
-            interface_conf += f"MTU = {a.interface.mtu}\n"
+        interface_conf += f"MTU = {a.interface.mtu}\n"
 
         # 生成 Peer 部分
         peer_confs = ""
@@ -446,14 +466,14 @@ class NetWorkWG:
             peer_conf = "\n[Peer]\n"
             if peer.name:
                 peer_conf += f"# name {peer.name}\n"
-            peer_conf += f'# ping6 {peer.allowed_ips[0].__str__()} -M do -s 2752\n'
+            peer_conf += f'# {peer.name} host grei{a.middle_char}{peer.name} ping {peer.allowed_ips[0].__str__()} -M do -s {peer.mtu}\n'
             peer_conf += f'# {peer.name} lxc exec pub-ibgp -- ping fe80::{peer.allowed_ips[0].__str__().split(":")[-1]}%grei{a.middle_char}{peer.name} -c 3 -M do -s 16 -W 10\n'
             peer_conf += f"PublicKey = {peer.public_key}\n"
             if peer.preshared_key:
                 peer_conf += f"PresharedKey = {peer.preshared_key}\n"
             peer_conf += f"AllowedIPs = {peer.allowed_ips[0].__str__()}/128\n"
             interface_conf += f'PostUp = ip tunnel add grei{a.middle_char}{peer.name} mode ip6gre local {a.interface.address[0].__str__()} remote {peer.allowed_ips[0].__str__()} ttl 30 || true\n'
-            interface_conf += f'PostUp = ip link set dev grei{a.middle_char}{peer.name} mtu 1500 || true\n'
+            interface_conf += f'PostUp = ip link set dev grei{a.middle_char}{peer.name} mtu {peer.mtu} || true\n'
             interface_conf += f'PostUp = ip link set grei{a.middle_char}{peer.name} up || true\n'
             interface_conf += f'PostDown = ip link del grei{a.middle_char}{peer.name} || true\n'
             if peer.endpoint:
@@ -465,12 +485,20 @@ class NetWorkWG:
 
 
 class NetworkOSPF:
-    async def __get_ping_result(self, __test_ip: str, interface_name=None, count=10) -> PingResult | None:
+    async def __get_ping_result(self, __test_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, interface_name=None,
+                                count=10, size=16, in_lxc=True) -> PingResult | None:
         if is_develop:
             stdout = develop_ping_result.encode()
         else:
-            returncode, stdout, stderr = await run_command(
-                host_mode_command(f'ping -c {count} {__test_ip} -M do -s 16 -W 10'))
+            __test_ip2 = f'{__test_ip}%{interface_name}' if __test_ip in ipaddress.ip_network(
+                "fe80::/64") else __test_ip
+            if in_lxc:
+                returncode, stdout, stderr = await run_command(
+                    host_mode_command(f'ping -c {count} {__test_ip2} -M do -s {size} -W 10'))
+            else:
+                returncode, stdout, stderr = await run_command(
+                    f'ping -c {count} {__test_ip2} -M do -s {size} -W 10')
+
         __ping_result = '\n'.join(line for line in stdout.decode().splitlines() if line.strip())  # 去除空行
         packet_loss_match = re.search(r'(\d+)% packet loss', __ping_result)
         if not packet_loss_match:
@@ -479,23 +507,38 @@ class NetworkOSPF:
         if packet_loss_percentage == 100:
             return  # 如果丢包率100%，返回None
         __a = __ping_result.splitlines()[-1].split(' ')[-2].split('/')
-
         result = PingResult(min=__a[0], avg=__a[1], max=__a[2], mdev=__a[3], packet_loss=packet_loss_percentage,
-                            interface_name=interface_name, full_text=__ping_result)
+                            interface_name=interface_name, full_text=__ping_result,
+                            mtu=size + 48 if __test_ip.version == 6 else 28)
         return result
 
-    async def ping_ip(self, __test_ip: str, interface_name=None) -> PingResult:
+    async def ping_ip(self, __test_ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+                      interface_name=None) -> PingResult:
         # 最大尝试3次，如果ping失败，返回300ms
-        result = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping',
-                            interface_name=interface_name)
+        result = copy.deepcopy(ping_result_fail)
+        result.interface_name = interface_name
         if not await self.__get_ping_result(__test_ip, interface_name, 1):  # 当第一次ping无效时候，接下来不做测试
             logging.warning(f'测试 {__test_ip} None ping')
             return result
         result = await self.__get_ping_result(__test_ip, interface_name)
-        logging.info(f'测试 {__test_ip} {result.text}')
+        logging.info(f'测试 {__test_ip} {interface_name} {result.text}')
         return result  # 如果超过10次，返回300ms
 
-    async def __test_all_ip(self) -> [PingResult, ]:
+    async def ping_mtu(self, __test_ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+                       interface_name=None) -> PingResult:
+        result = copy.deepcopy(ping_result_fail)
+        result.interface_name = interface_name
+        get_ping_result = await self.__get_ping_result(__test_ip, interface_name, 2, in_lxc=False)
+        if get_ping_result and get_ping_result.cost != 100:
+            test_mtus = [1504] + list(range(1320, 1280, -4))  # 1328
+            for test_mtu in test_mtus:
+                for_result = await self.__get_ping_result(__test_ip, interface_name, 2, test_mtu, in_lxc=False)
+                if for_result and for_result.cost != 100:
+                    for_result.mtu = test_mtu
+                    return for_result
+        return result
+
+    async def __test_all_ip(self, __type='mdev') -> [PingResult, ]:
         files_to_check, lxc_pub_gre_list = [
             '/etc/network/interfaces.d/lxcpubgre',
             '/etc/network/interfaces.d/lxcpub2gre',
@@ -514,22 +557,40 @@ class NetworkOSPF:
             return
         test_ips = []
         for lxc_pub_gre in lxc_pub_gre_list.split('\n'):
-            if ('#' not in lxc_pub_gre or
-                    'lxc exec pub-ibgp -- ping' not in lxc_pub_gre):
-                continue
-            fe80_address, interface_name = None, None
-            for a in lxc_pub_gre.split(' '):
-                fe80_address, interface_name = a.split('%') if a.startswith('fe80:') and '%' in a else None, None
-            if not fe80_address:
-                continue
-            test_ips.append((fe80_address, interface_name))
+            if __type == 'mdev':
+                match_re = re.match('^# (.*) lxc exec pub-ibgp -- ping ([^ ]+)%([^ ]+)', lxc_pub_gre)
+                if match_re:
+                    address, interface_name = match_re.group(2), match_re.group(3)
+                    test_ips.append((ipaddress.ip_address(address), interface_name))
+            else:  # mtu
+                match_re = re.match('^# (.*) host ([^ ]+) ping ([^ ]+) ', lxc_pub_gre)
+                if match_re:
+                    address, interface_name = match_re.group(3), match_re.group(2)
+                    test_ips.append((ipaddress.ip_address(address), interface_name))
         logging.debug(f'测试以下ip{test_ips}')
-        return await asyncio.gather(
-            *(self.ping_ip(f'{fe80_address}%{interface_name}', interface_name) for fe80_address, interface_name in
-              test_ips))
+        if __type == 'mdev':
+            result = await asyncio.gather(
+                *(self.ping_ip(fe80_address, interface_name) for fe80_address, interface_name in
+                  test_ips))
+        else:
+            result = await asyncio.gather(
+                *(self.ping_mtu(fe80_address, interface_name) for fe80_address, interface_name in
+                  test_ips))
+        return result
+
+    def gen_mtu(self):
+        ping_results: List[PingResult] = asyncio.run(self.__test_all_ip('mtu'))
+        host_cmds = []
+        for ping_result in ping_results:
+            if ping_result.packet_loss == 100:
+                continue
+            host_cmds.append(
+                host_mode_command(f'ip link set dev {ping_result.interface_name} mtu {ping_result.mtu - 4}'))
+        run_commands(host_cmds)
+        logging.info(f'设置了{len(host_cmds)}台主机')
 
     def gen_ospf_config(self, ospf_interface_str: str = ''):
-        ping_results: List[PingResult] = asyncio.run(self.__test_all_ip())
+        ping_results: List[PingResult] = asyncio.run(self.__test_all_ip('mdev'))
         for ping_result in ping_results:
             ospf_interface_str += f'\n        interface "{ping_result.interface_name}" {{type ptp; cost {ping_result.cost}; }}; # {ping_result.text}'
         ospf_config = f"""  # This file is generated by bird_head_gen.py
@@ -560,7 +621,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser(description='Calculate cylinder volume')
     parser.add_argument("module", type=str,
                         choices=["gen_bird_head", 'gen_network_interface_d', "gen_bird_ibgp", "gen_wg", "gen_gre",
-                                 "remove_gre", "gen_ospf_cost"])
+                                 "gen_mtu", "remove_gre", "gen_ospf_cost"])
     args = parser.parse_args()
     if args.module == 'gen_bird_head':
         bird_head_gen = BirdHeadGen()
@@ -577,6 +638,9 @@ if __name__ == '__main__':
     elif args.module == 'gen_gre':
         network_tools = NetWorkTools()
         network_tools.gen_host_gre_cmd2()
+    elif args.module == 'gen_mtu':
+        network_tools = NetworkOSPF()
+        network_tools.gen_mtu()
     elif args.module == 'remove_gre':
         network_tools = NetWorkTools()
         network_tools.remove_lxc_gre()
