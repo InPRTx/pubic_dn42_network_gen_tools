@@ -598,10 +598,12 @@ protocol ospf v3 aospf6 {{
     ipv6{{
         import filter{{
             if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
+            if (COUNTY ~ [156] && net ~ [2a13:b487:42d0::/44+]) then reject;
             accept;
         }};
         export filter{{
             if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
+            if ((65535, 666) ~ bgp_community || bgp_large_community ~ [(OWNAS, 4, *), (OWNAS, 5, *)]) then reject; # 过滤掉黑洞和不可达
             accept;
         }};
     }};
