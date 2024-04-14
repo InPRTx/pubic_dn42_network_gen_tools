@@ -99,8 +99,6 @@ class BirdIPAddress(BaseModel):
             other_subnet.add_new_other_subnet(f"{address}/27")
         elif mask == 32 and address in ipaddress.ip_network('172.23.173.160/28'):  # 中国段
             other_subnet.add_new_other_subnet(f"{address}/28")
-        elif mask == 32 and address in ipaddress.ip_network('172.20.197.176/29'):  # anycast段将由BGP获取
-            pass
         elif mask == 64 and address in ipaddress.ip_network('fdf4:56da:a360:f1c0::/60'):  # pub中国段
             other_subnet.add_new_other_subnet(f"{address}/60")
         elif mask == 64:
@@ -110,7 +108,7 @@ class BirdIPAddress(BaseModel):
             other_subnet.add_new_other_subnet(f"{address}/44")
             data['iid'] = address.compressed.split('::')[0].split('2a13:a5c3:')[-1]
         elif mask == 48:
-            other_subnet.add_new_other_subnet(f"{address}/47")
+            other_subnet.add_new_other_subnet(f"{address}/46")
             other_subnet.add_new_other_subnet(f"{address}/44")
             data['iid'] = address.compressed.split('::')[0].split('2a13:a5c3:')[-1]
 
