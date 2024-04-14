@@ -45,8 +45,7 @@ else:
     config = ConfigToml(**tomllib.loads(open('config.toml', 'r').read()))
 node_node = config.node.get(node_name)
 
-ping_result_fail = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping',
-                              packet_loss_percentage=100)
+ping_result_fail = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping')
 
 
 class BirdHeadGen:

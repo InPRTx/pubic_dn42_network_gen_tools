@@ -15,7 +15,7 @@ class PingResult(BaseModel):
     packet_loss: int = 100
     cost: int = 65535
     text: str = 'fail ping'
-    full_text: Optional[str]
+    full_text: Optional[str] = None
     interface_name: Optional[str] = None
     mtu: int = 1500
 
@@ -82,9 +82,9 @@ class BirdIPAddressOtherSubnet:
 
 class BirdIPAddress(BaseModel):
     address: Union[ipaddress.IPv4Address, ipaddress.IPv6Address]
-    mask: int
-    subnet: Union[ipaddress.IPv4Network, ipaddress.IPv6Network]  # 最大广播
-    other_subnet: List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]  # 其他应该广播的子网
+    mask: Optional[int]
+    subnet: Optional[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]  # 最大广播
+    other_subnet: Optional[List[Union[ipaddress.IPv4Network, ipaddress.IPv6Network]]]  # 其他应该广播的子网
     other_subnet_bird_static_reject_str: Optional[str]
     iid: Optional[str] = None
 
