@@ -39,8 +39,10 @@ develop_ping_result = """PING 1.1.1.1 (1.1.1.1) 56(84) bytes of data.
 --- 1.1.1.1 ping statistics ---
 5 packets transmitted, 4 received, 20% packet loss, time 4078ms
 rtt min/avg/max/mdev = 168.299/169.035/169.382/0.440 ms"""
-
-config = ConfigToml(**tomllib.loads(open('config.toml', 'r').read()))
+if CONFIG_FILE_PATH := os.getenv('CONFIG_FILE_PATH'):
+    config = ConfigToml(**tomllib.loads(open(CONFIG_FILE_PATH, 'r').read()))
+else:
+    config = ConfigToml(**tomllib.loads(open('config.toml', 'r').read()))
 node_node = config.node.get(node_name)
 
 ping_result_fail = PingResult(min=300, avg=300, max=300, mdev=300, packet_loss=100, text='fail ping',
