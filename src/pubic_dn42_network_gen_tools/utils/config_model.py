@@ -4,7 +4,7 @@ from typing import Optional, List, Union, Dict
 
 from pydantic import BaseModel, constr, IPvAnyAddress, Field, conint
 
-from src.pubic_dn42_network_gen_tools.utils.tools import ipaddress_to_gre_fe80
+from pubic_dn42_network_gen_tools.utils.tools import ipaddress_to_gre_fe80
 
 
 class PingResult(BaseModel):
