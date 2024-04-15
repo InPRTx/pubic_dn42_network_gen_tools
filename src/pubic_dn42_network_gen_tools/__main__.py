@@ -171,10 +171,11 @@ COMMIT
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
--A POSTROUTING -s 172.20.197.176/29 -j SNAT --to-source {node_node.ipv4_dn42.address}
--A POSTROUTING -s 100.64.0.2/32 -j SNAT --to-source {node_node.ipv4_pub.address}\n"""
-        if node_node.is_v4_nat_transit:
+-A POSTROUTING -s 172.20.197.176/29 -j SNAT --to-source {node_node.ipv4_dn42.address}\n"""
+        if node_node.is_v4_nat_transit:  # 如果是nat转发f
             result += f"-A POSTROUTING -s 100.64.0.0/24 -j -o eth0 MASQUERADE\n"
+        else:
+            result += f"-A POSTROUTING -s 100.64.0.2/32 -j SNAT --to-source {node_node.ipv4_pub.address}\n"
         result += "COMMIT"
         open(host_mode_file_path('/etc/iptables/rules.v4'), 'w').write(result)
 
