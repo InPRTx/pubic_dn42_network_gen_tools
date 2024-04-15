@@ -150,6 +150,7 @@ class Node(BaseModel):
     is_wire_tier1_large_net_to_kernel: bool = False
     is_rr_client: bool = False
     wg_pub: Optional[str] = None
+    is_v4_nat_transit: bool = True
 
     def __init__(self, **data):
         data['ipv4_dn42'] = BirdIPAddress(address=data['ipv4_dn42'])
