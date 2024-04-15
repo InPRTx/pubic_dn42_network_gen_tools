@@ -85,6 +85,7 @@ protocol static {{
     ipv6;
     route OWNNETv6 reject;{node_node.ipv6_pub.other_subnet_bird_static_reject_str}
     
+    route fdf4:56da:a360::/48 reject;
     route OWN42NETv6 reject;{node_node.ipv6_dn42.other_subnet_bird_static_reject_str}
 }}"""
 
