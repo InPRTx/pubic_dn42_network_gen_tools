@@ -330,7 +330,7 @@ class NetWorkWG:
                     wg_peer_mtu = vps_interface.mtu if vps_interface.mtu < node_interface.mtu else node_interface.mtu  # 设置为双方最小协商的mtu
                     wg_peer_mtu = 1500 if 1500 < wg_peer_mtu else wg_peer_mtu  # 大于1500的mtu统一设置为1500
                     wg_peer_mtu = wg_peer_mtu - 112 if vps_interface.ip_local.version == 4 else wg_peer_mtu - 132 \
-                        if wg_peer_mtu not in [1500, 9000] else 1500
+                        if wg_peer_mtu not in [9000] else 1500
                     wg_peers.append(WGPeer(public_key=node.wg_pub,
                                            allowed_ips=[
                                                ipaddress.IPv6Address(fd_network_prefix + node.ipv6_pub.iid)],

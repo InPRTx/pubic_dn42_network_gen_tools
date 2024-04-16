@@ -2,7 +2,7 @@ import ipaddress
 from enum import Enum
 from typing import Optional, List, Union, Dict
 
-from pydantic import BaseModel, constr, IPvAnyAddress, Field, conint
+from pydantic import BaseModel, constr, Field, conint, IPvAnyAddress
 
 from pubic_dn42_network_gen_tools.utils.tools import ipaddress_to_gre_fe80
 
@@ -36,7 +36,7 @@ class PingResult(BaseModel):
 class WGPeer(BaseModel):
     public_key: constr(strip_whitespace=True, min_length=44, max_length=44)  # WireGuard 公钥长度通常是 44
     preshared_key: constr(strip_whitespace=True, min_length=44, max_length=44) = None  # 可选
-    allowed_ips: list[IPvAnyAddress]
+    allowed_ips: list[Union[IPvAnyAddress, ipaddress.IPv6Address]]
     endpoint: str = None  # 可选
     persistent_keepalive: conint(ge=0, le=65535) = None  # 可选
     name: Optional[str] = Field(description="这是 my_field 的描述。")
@@ -45,7 +45,7 @@ class WGPeer(BaseModel):
 
 class WGInterface(BaseModel):
     private_key: constr(strip_whitespace=True, min_length=44, max_length=44)  # WireGuard 私钥长度通常是 44
-    address: list[IPvAnyAddress]
+    address: list[Union[IPvAnyAddress, ipaddress.IPv6Address]]
     listen_port: conint(ge=0, le=65535) = None  # 可选
     mtu: conint(ge=68, le=2800) = 2800  # 可选
 
