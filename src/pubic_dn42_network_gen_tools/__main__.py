@@ -521,8 +521,9 @@ if __name__ == '__main__':
         logging.info('已开启开发模式')
     parser = argparse.ArgumentParser(description='Calculate cylinder volume')
     parser.add_argument("module", type=str,
-                        choices=["gen_bird_head", 'gen_network_interface_d', "gen_netplan", "gen_bird_ibgp",
-                                 "gen_iptables", "gen_wg", "gen_gre", "gen_mtu", "remove_gre", "gen_ospf_cost"])
+                        choices=["gen_bird_head", 'gen_network_interface_d', "gen_netplan", "gen_systemd_networkd",
+                                 "gen_bird_ibgp", "gen_iptables", "gen_wg", "gen_gre", "gen_mtu", "remove_gre",
+                                 "gen_ospf_cost"])
     args = parser.parse_args()
     if args.module == 'gen_bird_head':
         bird_head_gen = BirdHeadGen()
