@@ -430,7 +430,7 @@ class NetworkOSPF:
         result.interface_name = interface_name
         get_ping_result = await self.__get_ping_result(__test_ip, interface_name, 2, in_lxc=False)
         if get_ping_result and get_ping_result.cost != 100:
-            test_mtus = list(range(1320, 1280, -4))  # 1328
+            test_mtus = list(range(1372, 1280, -4))  # 1328
             for test_mtu in test_mtus:
                 for_result = await self.__get_ping_result(__test_ip, interface_name, 2, test_mtu, in_lxc=False)
                 if for_result and for_result.cost != 100:
