@@ -386,7 +386,11 @@ class NetWorkWG:
 
 class NetworkOSPF:
     async def __get_ping_result(self, __test_ip: ipaddress.IPv4Address | ipaddress.IPv6Address, interface_name=None,
-                                count=10, size=16, in_lxc=True) -> PingResult | None:
+                                count=10, mtu: int = None, in_lxc=True) -> PingResult | None:
+        if not mtu:
+            size = 16
+        else:
+            size = mtu - 48 if __test_ip.version == 6 else mtu - 28
         if is_develop:
             stdout = develop_ping_result.encode()
         else:
@@ -409,7 +413,7 @@ class NetworkOSPF:
         __a = __ping_result.splitlines()[-1].split(' ')[-2].split('/')
         result = PingResult(min=__a[0], avg=__a[1], max=__a[2], mdev=__a[3], packet_loss=packet_loss_percentage,
                             interface_name=interface_name, full_text=__ping_result,
-                            mtu=size + 48 if __test_ip.version == 6 else 28)
+                            mtu=mtu)
         return result
 
     async def ping_ip(self, __test_ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
@@ -430,7 +434,8 @@ class NetworkOSPF:
         result.interface_name = interface_name
         get_ping_result = await self.__get_ping_result(__test_ip, interface_name, 2, in_lxc=False)
         if get_ping_result and get_ping_result.cost != 100:
-            test_mtus = list(range(1372, 1280, -4))  # 1328
+            max_mtu = 1420 if __test_ip.version == 6 else 1440
+            test_mtus = list(range(max_mtu, 1324, -16))  # 1328
             for test_mtu in test_mtus:
                 for_result = await self.__get_ping_result(__test_ip, interface_name, 2, test_mtu, in_lxc=False)
                 if for_result and for_result.cost != 100:
@@ -484,8 +489,9 @@ class NetworkOSPF:
         for ping_result in ping_results:
             if ping_result.packet_loss == 100:
                 continue
+            # 84 = ipv6 40 + gre 4 + ipv6 40
             host_cmds.append(
-                host_mode_command(f'ip link set dev {ping_result.interface_name} mtu {ping_result.mtu - 4}'))
+                host_mode_command(f'ip link set dev {ping_result.interface_name} mtu {ping_result.mtu - 84}'))
         run_commands(host_cmds)
         logging.info(f'设置了{len(host_cmds)}台主机')
 

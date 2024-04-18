@@ -17,7 +17,7 @@ class PingResult(BaseModel):
     text: str = 'fail ping'
     full_text: Optional[str] = None
     interface_name: Optional[str] = None
-    mtu: int = 1500
+    mtu: Optional[int] = None
 
     def __init__(self, **data):
         if data.get('packet_loss') is None or int(data.get('packet_loss')) == 100:
