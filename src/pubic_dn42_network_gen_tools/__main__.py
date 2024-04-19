@@ -492,7 +492,7 @@ class NetworkOSPF:
                 continue
             # 84 = ipv6 40 + gre 4 + ipv6 40
             host_cmds.append(
-                host_mode_command(f'ip link set dev {ping_result.interface_name} mtu {ping_result.mtu - 84}'))
+                host_mode_command(f'ip link set dev {ping_result.interface_name} mtu {ping_result.mtu - 52}'))
         run_commands(host_cmds)
         logging.info(f'设置了{len(host_cmds)}台主机')
 
