@@ -204,6 +204,12 @@ COMMIT
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
+-I POSTROUTING -p tcp --sport 1:1023 -s 172.20.229.221/32 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s 172.20.229.221/32 -j ACCEPT
+-I POSTROUTING -p tcp --sport 1:1023 -s 172.20.229.222/32 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s 172.20.229.222/32 -j ACCEPT
+-I POSTROUTING -p tcp --sport 1:1023 -s 100.64.0.2/32 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s 100.64.0.2/32 -j ACCEPT
 -A POSTROUTING -s 172.20.229.221/32 -j SNAT --to-source {node_node.ipv4_dn42.address}
 -A POSTROUTING -s 172.20.229.222/32 -j SNAT --to-source {node_node.ipv4_dn42.address}\n"""
         if node_node.is_v4_nat_transit:  # 如果是nat转发f
@@ -227,6 +233,10 @@ COMMIT
 :INPUT ACCEPT [0:0]
 :OUTPUT ACCEPT [0:0]
 :POSTROUTING ACCEPT [0:0]
+-I POSTROUTING -p tcp --sport 1:1023 -s fdf4:56da:a360::/64 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s fdf4:56da:a360::/64 -j ACCEPT
+-I POSTROUTING -p tcp --sport 1:1023 -s 2a13:a5c3:f100::/48 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s 2a13:a5c3:f100::/48 -j ACCEPT
 -A POSTROUTING -s fdf4:56da:a360::/64 -j SNAT --to-source {node_node.ipv6_dn42.address}
 -A POSTROUTING -s 2a13:a5c3:f100::/48 -j SNAT --to-source {node_node.ipv6_pub.address}
 COMMIT""")
