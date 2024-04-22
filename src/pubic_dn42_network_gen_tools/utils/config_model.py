@@ -157,8 +157,8 @@ class Node(BaseModel):
         data['ipv6_dn42'] = BirdIPAddress(address=data['ipv6_dn42']) if data.get('ipv6_dn42') else None
         data['ipv4_pub'] = BirdIPAddress(address=data['ipv4']) if data.get('ipv4') else None
         data['ipv6_pub'] = BirdIPAddress(address=data['ipv6'])
-        if data.get('is_transit'):
-            data['ipv6_pub'].other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
+        # if data.get('is_transit'):
+        #     data['ipv6_pub'].other_subnet_bird_static_reject_str += f'\n    route 2000::/3 reject;'
         super().__init__(**data)
 
 
