@@ -145,7 +145,7 @@ network:
       dhcp6: false
       accept-ra: false
       addresses:
-        - \"fe80::21:2623:1/64\"""")
+        - \"fe80::2:7010:1/64\"""")
                 logging.info('写入/etc/netplan/02-netcfg.yaml完成')
         os.chmod(host_mode_file_path('/etc/netplan/02-netcfg.yaml'), 0o600)
         if not os.path.exists(host_mode_file_path('/etc/netplan/10-ebgp.yaml')):
