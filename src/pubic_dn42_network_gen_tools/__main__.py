@@ -235,10 +235,10 @@ COMMIT
 :POSTROUTING ACCEPT [0:0]
 -I POSTROUTING -p tcp --sport 1:1023 -s fdf4:56da:a360::/64 -j ACCEPT
 -I POSTROUTING -p udp --sport 1:1023 -s fdf4:56da:a360::/64 -j ACCEPT
--I POSTROUTING -p tcp --sport 1:1023 -s 2a13:a5c3:f100::/48 -j ACCEPT
--I POSTROUTING -p udp --sport 1:1023 -s 2a13:a5c3:f100::/48 -j ACCEPT
+-I POSTROUTING -p tcp --sport 1:1023 -s 2a13:a5c3:f300::/48 -j ACCEPT
+-I POSTROUTING -p udp --sport 1:1023 -s 2a13:a5c3:f300::/48 -j ACCEPT
 -A POSTROUTING -s fdf4:56da:a360::/64 -j SNAT --to-source {node_node.ipv6_dn42.address}
--A POSTROUTING -s 2a13:a5c3:f100::/48 -j SNAT --to-source {node_node.ipv6_pub.address}
+-A POSTROUTING -s 2a13:a5c3:f300::/48 -j SNAT --to-source {node_node.ipv6_pub.address}
 COMMIT""")
 
 
@@ -517,13 +517,13 @@ protocol ospf v3 aospf6 {{
     ipv6{{
         import filter{{
             if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
-            if net ~ [ 2a13:a5c3:f100::/48 ] then reject; # 拒绝anycast段
-            if (COUNTY ~ [156] && net ~ [2a13:a5c3:f1d0::/44+]) then reject;
+            if net ~ [ 2a13:a5c3:f300::/48 ] then reject; # 拒绝anycast段
+            if (COUNTY ~ [156] && net ~ [2a13:a5c3:f3d0::/44+]) then reject;
             accept;
         }};
         export filter{{
             if !is_self_net_v6() || !(net.len <= 48 || net.len=128) then reject;
-            if net ~ [ 2a13:a5c3:f100::/48 ] then reject; # 拒绝anycast段
+            if net ~ [ 2a13:a5c3:f300::/48 ] then reject; # 拒绝anycast段
             if ((65535, 666) ~ bgp_community || bgp_large_community ~ [(OWNAS, 4, *), (OWNAS, 5, *)]) then reject; # 过滤掉黑洞和不可达
             accept;
         }};

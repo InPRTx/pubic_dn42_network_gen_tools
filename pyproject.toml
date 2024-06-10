@@ -1,6 +1,6 @@
 [project]
 name = "pubic_dn42_network_gen_tools"
-version = "0.1.0"
+version = "0.1.1"
 description = "Default template for PDM package"
 authors = [
     {name = "InPRTx", email = "inprtx@gmail.com"},

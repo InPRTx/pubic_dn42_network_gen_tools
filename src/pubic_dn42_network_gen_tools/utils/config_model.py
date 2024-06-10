@@ -104,7 +104,7 @@ class BirdIPAddress(BaseModel):
         elif mask == 64:
             other_subnet.add_new_other_subnet(f"{address}/63")
             other_subnet.add_new_other_subnet(f"{address}/60")
-        elif mask == 48 and address in ipaddress.ip_network('2a13:a5c3:f1c0::/44'):  # pub中国段
+        elif mask == 48 and address in ipaddress.ip_network('2a13:a5c3:f3c0::/44'):  # pub中国段
             other_subnet.add_new_other_subnet(f"{address}/44")
             data['iid'] = address.compressed.split('::')[0].split('2a13:a5c3:')[-1]
         elif mask == 48:
