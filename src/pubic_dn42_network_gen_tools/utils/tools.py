@@ -17,8 +17,8 @@ def ipaddress_to_gre_fe80(ip_addr: ipaddress.IPv4Address | ipaddress.IPv6Address
         return ipaddress.ip_address('fe80:' + "".join(
             f"{':' if i % 2 == 0 else ''}{int(b):02x}" for i, b in enumerate(ip_addr.exploded.split('.'))))
     else:
-        return ipaddress.ip_address(
-            'fe80:' + "".join(f":{b}" if b != "0000" else '' for b in ip_addr.exploded.split(':')[6:]))
+        __a = 'fe80:' + "".join(f":{b}" if b != "0000" else '' for b in ip_addr.exploded.split(':')[6:])
+        return ipaddress.ip_address('fe80::' if __a == 'fe80:' else __a)
 
 
 async def run_command(command: str) -> tuple[int, bytes, bytes]:
