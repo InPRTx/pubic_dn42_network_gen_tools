@@ -162,7 +162,13 @@ class Node(BaseModel):
         super().__init__(**data)
 
 
+class IBGPetwork(BaseModel):
+    pub: List[str]
+    rr: Dict[str, List]
+    rr_mutual: Dict[str, List]
+
+
 class ConfigToml(BaseModel):
-    ibgp_network: Dict[str, List]
+    ibgp_network: IBGPetwork
     wg_network: Dict[str, WGNetwork]
     node: Dict[str, Node]
