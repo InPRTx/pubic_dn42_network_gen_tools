@@ -5,6 +5,8 @@ import re
 is_develop = os.path.exists('./is_develop.txt')
 is_host_mode = os.path.exists('./is_host_mode.txt')
 is_debug_mode = os.path.exists('./is_debug_mode.txt')
+is_incus_mode = os.path.exists('/var/lib/incus/containers/pub-ibgp')
+incus_str = 'incus' if is_incus_mode else 'lxc'
 if is_debug_mode:
     logging.basicConfig(level=logging.DEBUG)
 else:

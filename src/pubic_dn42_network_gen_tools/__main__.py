@@ -11,7 +11,7 @@ from typing import List
 
 import pycountry
 
-from pubic_dn42_network_gen_tools.glovar import node_name, is_develop
+from pubic_dn42_network_gen_tools.glovar import node_name, is_develop, incus_str
 from pubic_dn42_network_gen_tools.utils.config_model import ConfigToml, PingResult, WGNetworkTypeEnum, WGInterface, \
     WGPeer, WireGuardConfig
 from pubic_dn42_network_gen_tools.utils.tools import host_mode_file_path, run_commands, host_mode_command, run_command
@@ -206,9 +206,9 @@ class NetWorkTools:
             if c in lxc_devices:
                 continue
             host_cmd_runs.append(
-                f"lxc config device add pub-ibgp {c} nic nictype=physical parent={c} name={c}")
+                f"{incus_str} config device add pub-ibgp {c} nic nictype=physical parent={c} name={c}")
             host_cmd_runs.append(
-                f"lxc exec pub-ibgp -- ip link set {c} up")
+                f"{incus_str} exec pub-ibgp -- ip link set {c} up")
         run_commands(host_cmd_runs)
 
     def remove_lxc_gre(self):
@@ -217,7 +217,7 @@ class NetWorkTools:
         for c in lxc_devices:
             if c[:5] not in ['grei4', 'grei6', 'greif']:
                 continue
-            host_cmd_runs.append(f"lxc config device rm pub-ibgp {c}")
+            host_cmd_runs.append(f"{incus_str} config device rm pub-ibgp {c}")
         run_commands(host_cmd_runs)
 
     def gen_bird_ibgp(self):
@@ -248,7 +248,7 @@ class NetWorkTools:
 
     def __get_lxc_device_show(self):
         result = []
-        a = develop_lxc_device_show_result if is_develop else os.popen('lxc config device show pub-ibgp').read()
+        a = develop_lxc_device_show_result if is_develop else os.popen(f'{incus_str} config device show pub-ibgp').read()
         for b in a.split('\n'):
             b1 = b.strip()
             if b != b1:
@@ -339,7 +339,7 @@ class NetWorkWG:
             if peer.name:
                 peer_conf += f"# name {peer.name}\n"
             peer_conf += f'# {peer.name} host grei{a.middle_char}{peer.name} ping {peer.allowed_ips[0].__str__()} -M do -s {peer.mtu}\n'
-            peer_conf += f'# {peer.name} lxc exec pub-ibgp -- ping fe80::{peer.allowed_ips[0].__str__().split(":")[-1]}%grei{a.middle_char}{peer.name} -c 3 -M do -s 16 -W 10\n'
+            peer_conf += f'# {peer.name} {incus_str} exec pub-ibgp -- ping fe80::{peer.allowed_ips[0].__str__().split(":")[-1]}%grei{a.middle_char}{peer.name} -c 3 -M do -s 16 -W 10\n'
             peer_conf += f"PublicKey = {peer.public_key}\n"
             if peer.preshared_key:
                 peer_conf += f"PresharedKey = {peer.preshared_key}\n"
@@ -436,7 +436,7 @@ class NetworkOSPF:
         test_ips = []
         for lxc_pub_gre in lxc_pub_gre_list.split('\n'):
             if __type == 'mdev':
-                match_re = re.match('^# (.*) lxc exec pub-ibgp -- ping ([^ ]+)%([^ ]+)', lxc_pub_gre)
+                match_re = re.match(f'^# (.*) {incus_str} exec pub-ibgp -- ping ([^ ]+)%([^ ]+)', lxc_pub_gre)
                 if match_re:
                     address, interface_name = match_re.group(2), match_re.group(3)
                     test_ips.append((ipaddress.ip_address(address), interface_name))

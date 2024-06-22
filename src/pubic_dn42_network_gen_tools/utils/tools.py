@@ -4,7 +4,7 @@ import logging
 import os
 import time
 
-from pubic_dn42_network_gen_tools.glovar import is_develop, is_host_mode
+from pubic_dn42_network_gen_tools.glovar import is_develop, is_host_mode, is_incus_mode, incus_str
 
 
 def ipaddress_to_gre_fe80(ip_addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> ipaddress.IPv6Address:
@@ -39,15 +39,18 @@ def run_commands(cmds: list[str]):
         if is_develop:
             continue
         os.popen(cmd)
-        if ('lxc config device add' in cmd or
-                'lxc config device rm' in cmd or
+        if (f'{incus_str} config device add' in cmd or
+                f'{incus_str} config device rm' in cmd or
                 'wg-quick' in cmd):
             time.sleep(0.2)  # 休眠0.2秒，防止lxc设备未创建完成
 
 
 def host_mode_command(command: str) -> str:
-    return command if is_host_mode else f'lxc exec pub-ibgp -- {command}'
+    return command if is_host_mode else f'{incus_str} exec pub-ibgp -- {command}'
 
 
 def host_mode_file_path(file_path: str) -> str:
-    return file_path if is_host_mode else f'/var/lib/lxd/containers/pub-ibgp/rootfs{file_path}'
+    if is_incus_mode:
+        return file_path if is_host_mode else f'/var/lib/incus/containers/pub-ibgp/rootfs{file_path}'
+    else:
+        return file_path if is_host_mode else f'/var/lib/lxd/containers/pub-ibgp/rootfs{file_path}'
